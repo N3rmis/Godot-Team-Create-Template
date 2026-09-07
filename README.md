@@ -2,11 +2,11 @@
 
 A starter project template for **Godot 4** with the **Team Create** real-time collaborative editing plugin pre-installed and pre-enabled.
 
-Create games, prototypes, and levels together with your friends and teammates in real time — Google Docs / Roblox Team Create style for the Godot Engine!
+Create games, prototypes, and levels together with your friends and teammates in real time for the Godot Engine!
 
 ---
 
-## 🚀 Features
+## Features
 
 - **Live Scene Synchronization**: Real-time multi-user editing for nodes, transforms, properties, animations, and in-memory sub-resources (materials, primitive meshes, shapes).
 - **Collaborative Code Editing**: Live script editing with 100ms debounced line diffs, live colored presence carets, collaborator name badges, and selection highlighting on `CodeEdit`.
@@ -18,7 +18,7 @@ Create games, prototypes, and levels together with your friends and teammates in
 
 ---
 
-## 🎮 Quick Start
+## Quick Start
 
 1. **Open the Project**:
    - Open this project in **Godot 4.2+** (compatible with Godot 4.2, 4.3, and 4.7+).
@@ -33,7 +33,7 @@ Create games, prototypes, and levels together with your friends and teammates in
 
 ---
 
-## 🌐 Network & Port Forwarding
+## Network & Port Forwarding
 
 - **Default Port**: `25567` (UDP Multiplayer & TCP HTTP Asset Streaming).
 - If hosting over the internet (outside your local Wi-Fi / LAN), ensure port `25567` (both **UDP** and **TCP**) is forwarded on your router to your host PC, or run a dedicated headless server on a VPS.
@@ -41,7 +41,7 @@ Create games, prototypes, and levels together with your friends and teammates in
 
 ---
 
-## 🔄 Automatic Upstream Synchronization
+## Automatic Upstream Synchronization
 
 This template repository is automatically synchronized with the upstream plugin repository:
 👉 [https://github.com/N3rmis/Godot-Team-Create](https://github.com/N3rmis/Godot-Team-Create)
