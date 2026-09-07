@@ -1,0 +1,57 @@
+name: Sync Team Create Plugin
+
+on:
+  # Automatically check for upstream updates every 6 hours
+  schedule:
+    - cron: '0 */6 * * *'
+  # Allow manual trigger with 1 click from the GitHub Actions tab
+  workflow_dispatch:
+  # Allow trigger via repository_dispatch event from the upstream repo
+  repository_dispatch:
+    types: [plugin_updated]
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Template Repository
+        uses: actions/checkout@v4
+        with:
+          path: template
+
+      - name: Checkout Upstream Plugin Repository
+        uses: actions/checkout@v4
+        with:
+          repository: N3rmis/Godot-Team-Create
+          ref: main
+          path: upstream
+
+      - name: Sync Plugin Files
+        run: |
+          echo "Syncing addons/team_create from N3rmis/Godot-Team-Create..."
+          rm -rf template/addons/team_create
+          mkdir -p template/addons
+          cp -r upstream/addons/team_create template/addons/
+          
+          cd upstream
+          UPSTREAM_SHA=$(git rev-parse --short HEAD)
+          echo "UPSTREAM_SHA=$UPSTREAM_SHA" >> $GITHUB_ENV
+          cd ../template
+
+      - name: Commit and Push Changes
+        run: |
+          cd template
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          if [ -n "$(git status --porcelain)" ]; then
+            git add addons/team_create
+            git commit -m "chore(sync): update Team Create plugin from upstream (${{ env.UPSTREAM_SHA }})"
+            git push origin main
+            echo "Successfully updated and pushed new plugin version."
+          else
+            echo "No changes detected. Template is already up to date."
+          fi
