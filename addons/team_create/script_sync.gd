@@ -25,6 +25,7 @@ var _applying_remote_depth: int = 0       # Suppress local diffs during remote u
 
 # Server text buffers (Headless / Host persistence)
 var _server_script_buffers: Dictionary = {} # script_path -> PackedStringArray
+var _server_script_revisions: Dictionary = {} # script_path -> int
 var _server_save_timer: float = 0.0
 
 # Presence state
@@ -177,13 +178,24 @@ func _attach_presence_overlay(path: String, code_edit: Control):
 		if hsb and not hsb.value_changed.is_connected(overlay._on_scroll_changed):
 			hsb.value_changed.connect(overlay._on_scroll_changed)
 
+func _send_peer_caret(peer_id: int, path: String, line: int, col: int, has_sel: bool, sfl: int, sfc: int, stl: int, stc: int):
+	if not (network and network.is_connected_to_session()):
+		return
+	var my_id = multiplayer.get_unique_id()
+	if network.is_server:
+		for pid in network.peers:
+			if pid != 1 and pid != my_id:
+				rpc_id(pid, "update_peer_script_caret", peer_id, path, line, col, has_sel, sfl, sfc, stl, stc)
+	elif my_id != 1:
+		rpc_id(1, "update_peer_script_caret", peer_id, path, line, col, has_sel, sfl, sfc, stl, stc)
+
 func _on_editor_script_changed(script: Script):
 	if not is_instance_valid(script) or script.resource_path == "":
 		if _active_script_path != "":
 			_active_script_path = ""
 			if network and network.is_connected_to_session():
 				var my_id = multiplayer.get_unique_id()
-				rpc("update_peer_script_caret", my_id, "", 0, 0, false, 0, 0, 0, 0)
+				_send_peer_caret(my_id, "", 0, 0, false, 0, 0, 0, 0)
 		return
 	var path = script.resource_path
 	if path != "":
@@ -205,7 +217,7 @@ func _on_script_closed(script: Script):
 		_active_script_path = ""
 		if network and network.is_connected_to_session():
 			var my_id = multiplayer.get_unique_id()
-			rpc("update_peer_script_caret", my_id, "", 0, 0, false, 0, 0, 0, 0)
+			_send_peer_caret(my_id, "", 0, 0, false, 0, 0, 0, 0)
 
 func _on_code_edit_text_changed(path: String):
 	if _applying_remote_depth > 0:
@@ -257,8 +269,15 @@ func _broadcast_script_diff(path: String):
 	_synced_lines[path] = cur_lines
 	var checksum = cur_text.md5_text()
 
-	# Broadcast delta to peers and server
-	rpc("apply_script_patch", path, start_line, old_count, new_slice, next_rev, checksum)
+	# Targeted delivery: host sends directly to peers; clients send to server (peer 1) for relay
+	if network and network.is_server:
+		_apply_patch_to_server_buffer(path, start_line, old_count, new_slice)
+		_server_script_revisions[path] = next_rev
+		for pid in network.peers:
+			if pid != 1:
+				rpc_id(pid, "apply_script_patch", path, start_line, old_count, new_slice, next_rev, checksum)
+	elif multiplayer.get_unique_id() != 1:
+		rpc_id(1, "apply_script_patch", path, start_line, old_count, new_slice, next_rev, checksum)
 
 @rpc("any_peer", "reliable")
 func apply_script_patch(path: String, start_line: int, old_count: int, new_lines: PackedStringArray, revision: int, checksum: String = ""):
@@ -267,6 +286,7 @@ func apply_script_patch(path: String, start_line: int, old_count: int, new_lines
 	# 1. Server relay & buffer update
 	if network and network.is_server:
 		_apply_patch_to_server_buffer(path, start_line, old_count, new_lines)
+		_server_script_revisions[path] = revision
 		if sender_id != 0:
 			for pid in network.peers:
 				if pid != sender_id and pid != 1:
@@ -276,10 +296,18 @@ func apply_script_patch(path: String, start_line: int, old_count: int, new_lines
 	if network and (network.get("is_standalone_server") or DisplayServer.get_name() == "headless"):
 		return
 
+	# Deduplication & packet order guard: drop stale or duplicate packets immediately
+	var cur_rev = _script_revisions.get(path, 0)
+	if revision <= cur_rev:
+		return
+	if cur_rev > 0 and revision > cur_rev + 1:
+		_request_script_if_needed(path)
+		return
+
 	# 3. Apply to open editor if tracked
 	if not _tracked_editors.has(path):
 		# If script isn't open locally, just update stored lines so when opened it has them
-		_apply_patch_to_offline_lines(path, start_line, old_count, new_lines, checksum)
+		_apply_patch_to_offline_lines(path, start_line, old_count, new_lines, revision, checksum)
 		return
 
 	var code_edit = _tracked_editors[path]
@@ -341,20 +369,19 @@ func apply_script_patch(path: String, start_line: int, old_count: int, new_lines
 	if checksum != "":
 		var local_md5 = updated_text.md5_text()
 		if local_md5 != checksum:
-			if network:
-				network.tc_print("Script desync detected on " + path + ". Requesting authoritative server state...")
+			print_verbose("[TeamCreate] Script desync detected on " + path + ". Requesting authoritative server state...")
 			_request_script_if_needed(path)
 
 	# Redraw presence overlay
 	if _overlays.has(path) and is_instance_valid(_overlays[path]):
 		_overlays[path].queue_redraw()
 
-func _apply_patch_to_offline_lines(path: String, start_line: int, old_count: int, new_lines: PackedStringArray, checksum: String = ""):
+func _apply_patch_to_offline_lines(path: String, start_line: int, old_count: int, new_lines: PackedStringArray, revision: int, checksum: String = ""):
 	var lines = _synced_lines.get(path, PackedStringArray())
 	if lines.is_empty() and FileAccess.file_exists(path):
 		var f = FileAccess.open(path, FileAccess.READ)
 		if f:
-			lines = f.get_as_text().split("\n")
+			lines = f.get_as_text().replace("\r\n", "\n").split("\n")
 			f.close()
 
 	var prefix = lines.slice(0, start_line)
@@ -364,6 +391,7 @@ func _apply_patch_to_offline_lines(path: String, start_line: int, old_count: int
 	result.append_array(new_lines)
 	result.append_array(suffix)
 	_synced_lines[path] = result
+	_script_revisions[path] = revision
 	if checksum != "" and "\n".join(result).md5_text() != checksum:
 		_request_script_if_needed(path)
 
@@ -372,7 +400,7 @@ func _apply_patch_to_server_buffer(path: String, start_line: int, old_count: int
 	if lines.is_empty() and FileAccess.file_exists(path):
 		var f = FileAccess.open(path, FileAccess.READ)
 		if f:
-			lines = f.get_as_text().split("\n")
+			lines = f.get_as_text().replace("\r\n", "\n").split("\n")
 			f.close()
 
 	var prefix = lines.slice(0, start_line)
@@ -433,7 +461,7 @@ func _broadcast_local_caret():
 	_last_broadcast_caret = caret_state
 
 	var my_id = multiplayer.get_unique_id()
-	rpc("update_peer_script_caret", my_id, _active_script_path, line, col, has_sel, sel_from_line, sel_from_col, sel_to_line, sel_to_col)
+	_send_peer_caret(my_id, _active_script_path, line, col, has_sel, sel_from_line, sel_from_col, sel_to_line, sel_to_col)
 
 @rpc("any_peer", "unreliable")
 func update_peer_script_caret(peer_id: int, path: String, line: int, col: int, has_sel: bool, sel_from_line: int, sel_from_col: int, sel_to_line: int, sel_to_col: int):
@@ -519,18 +547,19 @@ func request_script_state(path: String):
 		if _server_script_buffers.has(path):
 			text = "\n".join(_server_script_buffers[path])
 		elif _tracked_editors.has(path) and is_instance_valid(_tracked_editors[path]):
-			text = _tracked_editors[path].get_text()
+			text = _tracked_editors[path].get_text().replace("\r\n", "\n")
 		elif FileAccess.file_exists(path):
 			var f = FileAccess.open(path, FileAccess.READ)
 			if f:
-				text = f.get_as_text()
+				text = f.get_as_text().replace("\r\n", "\n")
 				f.close()
 
-	var rev = _script_revisions.get(path, 0)
+	var rev = _server_script_revisions.get(path, _script_revisions.get(path, 0))
 	rpc_id(sender_id, "receive_script_state", path, text, rev)
 
 @rpc("any_peer", "reliable")
 func receive_script_state(path: String, full_text: String, revision: int):
+	full_text = full_text.replace("\r\n", "\n")
 	_script_revisions[path] = revision
 	_synced_lines[path] = full_text.split("\n")
 
@@ -567,6 +596,7 @@ func clear_all():
 	_peer_active_scripts.clear()
 	_synced_lines.clear()
 	_script_revisions.clear()
+	_server_script_revisions.clear()
 	_diff_timers.clear()
 	_dirty_scripts.clear()
 	_last_broadcast_caret.clear()
@@ -603,6 +633,8 @@ class ScriptPresenceOverlay extends Control:
 		if total_lines <= 0:
 			return
 
+		var local_caret_line = code_edit.get_caret_line() if code_edit.has_method("get_caret_line") else -1
+
 		for peer_id in peer_map.keys():
 			var data = peer_map[peer_id]
 			var color = script_sync.network.get_user_color(peer_id) if script_sync.network else Color.WHITE
@@ -610,13 +642,35 @@ class ScriptPresenceOverlay extends Control:
 			if script_sync.network and script_sync.network.peers.has(peer_id):
 				username = script_sync.network.peers[peer_id].get("username", username)
 
+			var target_line = data.get("line", 0)
+			if target_line < 0 or target_line >= total_lines:
+				continue
+
+			# Caret proximity transparency calculation
+			var caret_alpha: float = 1.0
+			if local_caret_line >= 0:
+				var line_dist = abs(target_line - local_caret_line)
+				if line_dist == 0:
+					caret_alpha = 0.05 # 95% transparent on same line
+				elif line_dist == 1:
+					caret_alpha = 0.20 # 80% transparent 1 line away
+				elif line_dist == 2:
+					caret_alpha = 0.40 # 60% transparent 2 lines away
+				elif line_dist == 3:
+					caret_alpha = 0.70 # 30% transparent 3 lines away
+				else:
+					caret_alpha = 1.0  # fully visible further away
+
+			var caret_color = Color(color.r, color.g, color.b, caret_alpha)
+			var badge_text_color = Color(1.0, 1.0, 1.0, caret_alpha)
+
 			# 1. Selection highlighting
 			if data.get("has_sel", false):
 				var sfl = clamp(data.get("sfl", 0), 0, total_lines - 1)
 				var sfc = data.get("sfc", 0)
 				var stl = clamp(data.get("stl", 0), 0, total_lines - 1)
 				var stc = data.get("stc", 0)
-				var sel_color = Color(color.r, color.g, color.b, 0.25)
+				var sel_color = Color(color.r, color.g, color.b, max(0.02, 0.25 * caret_alpha))
 
 				if sfl == stl:
 					var line_len = code_edit.get_line(sfl).length()
@@ -645,10 +699,6 @@ class ScriptPresenceOverlay extends Control:
 							draw_rect(Rect2(x1, r1.position.y, sel_w, line_height), sel_color)
 
 			# 2. Caret line
-			var target_line = data.get("line", 0)
-			if target_line < 0 or target_line >= total_lines:
-				continue
-
 			var line_len = code_edit.get_line(target_line).length()
 			var target_col = clamp(data.get("col", 0), 0, line_len)
 			var caret_rect = code_edit.get_rect_at_line_column(target_line, target_col)
@@ -656,10 +706,10 @@ class ScriptPresenceOverlay extends Control:
 			if caret_rect.position.x >= 0 and caret_rect.position.y >= 0:
 				var caret_x = caret_rect.position.x if target_col == 0 else (caret_rect.position.x + caret_rect.size.x)
 
-				# Draw 2px solid colored bar
-				draw_rect(Rect2(caret_x, caret_rect.position.y, 2, line_height), color)
+				# Draw 2px solid colored bar with proximity transparency
+				draw_rect(Rect2(caret_x, caret_rect.position.y, 2, line_height), caret_color)
 
-				# 3. Name badge pill
+				# 3. Name badge pill with proximity transparency
 				var text_size = font.get_string_size(username, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size)
 				var pad_x = 4.0
 				var pad_y = 2.0
@@ -669,6 +719,6 @@ class ScriptPresenceOverlay extends Control:
 				badge_pos.y = max(0.0, badge_pos.y)
 
 				# Background pill
-				draw_rect(Rect2(badge_pos, Vector2(badge_w, badge_h)), color)
+				draw_rect(Rect2(badge_pos, Vector2(badge_w, badge_h)), caret_color)
 				# White text
-				draw_string(font, Vector2(badge_pos.x + pad_x, badge_pos.y + pad_y + text_size.y - 2), username, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, Color.WHITE)
+				draw_string(font, Vector2(badge_pos.x + pad_x, badge_pos.y + pad_y + text_size.y - 2), username, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, badge_text_color)

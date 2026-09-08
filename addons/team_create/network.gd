@@ -46,7 +46,7 @@ var joins_enabled: bool = true
 var allow_client_file_deletions: bool = true
 var auto_relay_files: bool = true
 var chat_locked: bool = false
-var chat_images_enabled: bool = true
+var chat_images_enabled: bool = false
 var muted_users = []
 var admins = []
 var host_auth_token: String = ""
@@ -240,7 +240,7 @@ func _server_console_thread_func():
 	tc_print_rich("[color=green]Server console ready. Type /help for a list of commands.[/color]")
 	while not _console_should_exit:
 		# OS.read_string_from_stdin is blocking. It will wake up when the user hits Enter.
-		var input = OS.read_string_from_stdin().strip_edges()
+		var input = OS.read_string_from_stdin(1024).strip_edges()
 		if input == "":
 			OS.delay_msec(50)
 			continue
@@ -858,7 +858,15 @@ func kick_peer(id: int):
 		tc_print("Kicked peer ", id)
 
 func is_connected_to_session() -> bool:
-	return is_inside_tree() and multiplayer != null and multiplayer.has_multiplayer_peer() and multiplayer.multiplayer_peer != null and multiplayer.multiplayer_peer.get_connection_status() == MultiplayerPeer.CONNECTION_CONNECTED
+	if not is_inside_tree() or multiplayer == null:
+		return false
+	if not multiplayer.has_multiplayer_peer() or not (multiplayer.multiplayer_peer is ENetMultiplayerPeer):
+		return false
+	if multiplayer.multiplayer_peer.get_connection_status() != MultiplayerPeer.CONNECTION_CONNECTED:
+		return false
+	if not is_server and multiplayer.get_unique_id() == 1:
+		return false
+	return true
 
 func update_local_username(new_name: String):
 	_local_username = new_name
